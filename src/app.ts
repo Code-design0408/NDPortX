@@ -352,3 +352,6 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   console.error("Unhandled server error:", err);
   res.status(500).json({ error: "Internal server error", details: err?.message || String(err) });
 });
+
+export const handler = app;
+export default app;
