@@ -264,7 +264,7 @@ app.post("/api/scan", async (req: Request, res: Response) => {
 });
 
 app.get("/api/scan/:scan_id/stream", (req: Request, res: Response) => {
-  const scanId = req.params.scan_id;
+  const scanId = Array.isArray(req.params.scan_id) ? req.params.scan_id[0] : req.params.scan_id;
   const state = scans.get(scanId);
 
   if (!state) {
@@ -316,7 +316,7 @@ app.get("/api/scan/:scan_id/stream", (req: Request, res: Response) => {
 });
 
 app.post("/api/scan/:scan_id/stop", (req: Request, res: Response) => {
-  const scanId = req.params.scan_id;
+  const scanId = Array.isArray(req.params.scan_id) ? req.params.scan_id[0] : req.params.scan_id;
   const state = scans.get(scanId);
 
   if (!state) {
@@ -328,7 +328,7 @@ app.post("/api/scan/:scan_id/stop", (req: Request, res: Response) => {
 });
 
 app.get("/api/scan/:scan_id/export", (req: Request, res: Response) => {
-  const scanId = req.params.scan_id;
+  const scanId = Array.isArray(req.params.scan_id) ? req.params.scan_id[0] : req.params.scan_id;
   const state = scans.get(scanId);
 
   if (!state) {
