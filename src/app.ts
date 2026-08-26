@@ -1,8 +1,7 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import express, { Request, Response } from "express";
+import express, { NextFunction, Request, Response } from "express";
 import { exportResults } from "./exporter.js";
 import {
   logError,
@@ -12,6 +11,8 @@ import {
 } from "./logger.js";
 import { PortScanner, ScanResult } from "./scanner.js";
 import { PRESETS } from "./services.js";
+import { getAppJs, getStyleCss } from "./static-assets.js";
+import { getIndexHtml, getWelcomeHtml } from "./templates.js";
 import { ensureDir } from "./utils.js";
 import {
   validatePortRange,
@@ -70,41 +71,34 @@ function cleanupOldScans(): void {
 
 app.use(express.json());
 
-function resolveStaticPath(...segments: string[]): string {
-  const candidates = [
-    path.join(process.cwd(), ...segments),
-    path.join(path.dirname(new URL(import.meta.url).pathname), "..", ...segments),
-    path.join("/var/task", ...segments),
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c)) {
-      return c;
-    }
-  }
-  return path.join(process.cwd(), ...segments);
-}
+// Serve static assets with fallback handlers
+app.use("/static", express.static(path.join(process.cwd(), "static")));
+app.use("/static", express.static(path.join(process.cwd(), "public", "static")));
 
-const staticPath = resolveStaticPath("static");
-app.use("/static", express.static(staticPath));
+app.get("/static/style.css", (_req: Request, res: Response) => {
+  res.setHeader("Content-Type", "text/css; charset=utf-8");
+  return res.send(getStyleCss());
+});
+
+app.get("/static/app.js", (_req: Request, res: Response) => {
+  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+  const js = getAppJs();
+  if (js) return res.send(js);
+  return res.sendFile(path.join(process.cwd(), "static", "app.js"));
+});
 
 // ---------------------------------------------------------------------------
 // HTML Pages
 // ---------------------------------------------------------------------------
 
 app.get("/", (_req: Request, res: Response) => {
-  const welcomePath = resolveStaticPath("templates", "welcome.html");
-  if (fs.existsSync(welcomePath)) {
-    return res.sendFile(welcomePath);
-  }
-  return res.redirect("/scanner");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  return res.send(getWelcomeHtml());
 });
 
 app.get("/scanner", (_req: Request, res: Response) => {
-  const indexPath = resolveStaticPath("templates", "index.html");
-  if (fs.existsSync(indexPath)) {
-    return res.sendFile(indexPath);
-  }
-  return res.status(404).send("Dashboard template not found.");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  return res.send(getIndexHtml());
 });
 
 // ---------------------------------------------------------------------------
@@ -351,4 +345,10 @@ app.get("/api/scan/:scan_id/export", (req: Request, res: Response) => {
     logError("api_scan_export", exc);
     return res.status(400).json({ error: String(exc) });
   }
+});
+
+// Global Error Handler to catch any unhandled request errors gracefully
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error("Unhandled server error:", err);
+  res.status(500).json({ error: "Internal server error", details: err?.message || String(err) });
 });
