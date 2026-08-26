@@ -1,7 +1,0 @@
-.env*
-.git
-.github
-*.md
-LICENSE
-server.ts
-tsconfig.json
