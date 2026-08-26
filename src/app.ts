@@ -69,14 +69,30 @@ function cleanupOldScans(): void {
 }
 
 app.use(express.json());
-app.use("/static", express.static(path.join(process.cwd(), "static")));
+
+function resolveStaticPath(...segments: string[]): string {
+  const candidates = [
+    path.join(process.cwd(), ...segments),
+    path.join(path.dirname(new URL(import.meta.url).pathname), "..", ...segments),
+    path.join("/var/task", ...segments),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) {
+      return c;
+    }
+  }
+  return path.join(process.cwd(), ...segments);
+}
+
+const staticPath = resolveStaticPath("static");
+app.use("/static", express.static(staticPath));
 
 // ---------------------------------------------------------------------------
 // HTML Pages
 // ---------------------------------------------------------------------------
 
 app.get("/", (_req: Request, res: Response) => {
-  const welcomePath = path.join(process.cwd(), "templates", "welcome.html");
+  const welcomePath = resolveStaticPath("templates", "welcome.html");
   if (fs.existsSync(welcomePath)) {
     return res.sendFile(welcomePath);
   }
@@ -84,8 +100,11 @@ app.get("/", (_req: Request, res: Response) => {
 });
 
 app.get("/scanner", (_req: Request, res: Response) => {
-  const indexPath = path.join(process.cwd(), "templates", "index.html");
-  return res.sendFile(indexPath);
+  const indexPath = resolveStaticPath("templates", "index.html");
+  if (fs.existsSync(indexPath)) {
+    return res.sendFile(indexPath);
+  }
+  return res.status(404).send("Dashboard template not found.");
 });
 
 // ---------------------------------------------------------------------------
