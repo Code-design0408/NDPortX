@@ -8,7 +8,7 @@ export interface TargetResult {
 }
 
 export async function validateTarget(target: string): Promise<TargetResult> {
-  const cleanTarget = (target || "").trim();
+  const cleanTarget = (target || "").trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "").replace(/:\d+$/, "");
   if (!cleanTarget) {
     return { isValid: false, message: "Target cannot be empty." };
   }
@@ -22,20 +22,64 @@ export async function validateTarget(target: string): Promise<TargetResult> {
     };
   }
 
-  // Attempt hostname resolution via DNS
+  // Attempt hostname resolution via DNS (prefer IPv4 for outbound socket reliability)
   try {
-    const lookupResult = await dns.lookup(cleanTarget);
-    return {
-      isValid: true,
-      message: `Resolved '${cleanTarget}' to ${lookupResult.address}.`,
-      resolvedIp: lookupResult.address,
-    };
+    try {
+      const ipv4 = await dns.lookup(cleanTarget, { family: 4 });
+      return {
+        isValid: true,
+        message: `Resolved '${cleanTarget}' to ${ipv4.address}.`,
+        resolvedIp: ipv4.address,
+      };
+    } catch {
+      const fallback = await dns.lookup(cleanTarget);
+      return {
+        isValid: true,
+        message: `Resolved '${cleanTarget}' to ${fallback.address}.`,
+        resolvedIp: fallback.address,
+      };
+    }
   } catch (err: any) {
     return {
       isValid: false,
       message: `Could not resolve hostname '${cleanTarget}'. Check spelling and your network connection.`,
     };
   }
+}
+
+export function parsePorts(input: string | number | number[]): number[] {
+  if (Array.isArray(input)) {
+    return Array.from(new Set(input.map(Number).filter((p) => p >= 1 && p <= 65535))).sort((a, b) => a - b);
+  }
+  if (typeof input === "number") {
+    return input >= 1 && input <= 65535 ? [input] : [];
+  }
+  const str = String(input || "").trim();
+  if (!str) return [];
+
+  const result = new Set<number>();
+  const parts = str.split(/[,\s]+/);
+
+  for (const part of parts) {
+    if (!part) continue;
+    if (part.includes("-")) {
+      const [startStr, endStr] = part.split("-");
+      const s = parseInt(startStr, 10);
+      const e = parseInt(endStr, 10);
+      if (!isNaN(s) && !isNaN(e) && s >= 1 && e <= 65535 && s <= e) {
+        for (let i = s; i <= e; i++) {
+          result.add(i);
+        }
+      }
+    } else {
+      const p = parseInt(part, 10);
+      if (!isNaN(p) && p >= 1 && p <= 65535) {
+        result.add(p);
+      }
+    }
+  }
+
+  return Array.from(result).sort((a, b) => a - b);
 }
 
 export function validatePortRange(start: unknown, end: unknown): [boolean, string] {

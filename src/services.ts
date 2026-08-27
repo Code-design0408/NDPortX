@@ -48,6 +48,10 @@ export function getService(port: number): string {
 }
 
 // Quick presets for the "Port Range" section
+export const TOP_20_PORTS: number[] = [
+  21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080,
+].sort((a, b) => a - b);
+
 export const TOP_100_PORTS: number[] = Array.from(
   new Set([
     1, 3, 4, 6, 7, 9, 13, 17, 19, 20, 21, 22, 23, 24, 25, 26, 30, 32, 33,
@@ -79,7 +83,9 @@ export const COMMON_WEB_PORTS: number[] = Array.from(
 ).sort((a, b) => a - b);
 
 export const PRESETS: Record<string, number[]> = {
-  "Top 100": TOP_100_PORTS,
-  "Top 1000": TOP_1000_PORTS,
   "Common Web": COMMON_WEB_PORTS,
+  "Top 20": TOP_20_PORTS,
+  "Top 100": TOP_100_PORTS,
+  "Standard 1-1024": base1024,
+  "Top 1000": TOP_1000_PORTS,
 };

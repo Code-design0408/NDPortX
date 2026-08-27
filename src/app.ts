@@ -15,6 +15,7 @@ import { getAppJs, getStyleCss } from "./static-assets.js";
 import { getIndexHtml, getWelcomeHtml } from "./templates.js";
 import { ensureDir } from "./utils.js";
 import {
+  parsePorts,
   validatePortRange,
   validateTarget,
   validateThreads,
@@ -26,7 +27,7 @@ export const app = express();
 // Safety limits
 const MAX_PORTS_PER_SCAN = 3000;
 const MAX_THREADS = 150;
-const MAX_CONCURRENT_SCANS = 4;
+const MAX_CONCURRENT_SCANS = 8;
 const SCAN_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 const EXPORT_DIR = ensureDir(
@@ -40,8 +41,7 @@ interface ScanState {
   status: "running" | "stopped" | "complete";
   target: string;
   resolved_ip: string;
-  start_port: number;
-  end_port: number;
+  ports: number[];
   results: ScanResult[];
   duration: number;
   finished_at: number;
@@ -106,11 +106,10 @@ app.get("/scanner", (_req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 
 app.get("/api/presets", (_req: Request, res: Response) => {
-  const result: Record<string, { min: number; max: number; count: number }> = {};
+  const result: Record<string, { ports: number[]; count: number }> = {};
   for (const [name, ports] of Object.entries(PRESETS)) {
     result[name] = {
-      min: Math.min(...ports),
-      max: Math.max(...ports),
+      ports,
       count: ports.length,
     };
   }
@@ -132,8 +131,10 @@ app.post("/api/scan", async (req: Request, res: Response) => {
 
   const data = req.body || {};
   const targetRaw = String(data.target || "").trim();
-  const startPortRaw = data.start_port ?? 1;
-  const endPortRaw = data.end_port ?? 1024;
+  const presetName = data.preset ? String(data.preset) : "";
+  const customPortsRaw = data.ports || data.custom_ports;
+  const startPortRaw = data.start_port;
+  const endPortRaw = data.end_port;
   const timeoutRaw = data.timeout ?? 0.5;
   const threadsRaw = data.threads ?? 100;
 
@@ -142,9 +143,30 @@ app.post("/api/scan", async (req: Request, res: Response) => {
     return res.status(400).json({ error: targetCheck.message });
   }
 
-  const [rangeOk, rangeMsg] = validatePortRange(startPortRaw, endPortRaw);
-  if (!rangeOk) {
-    return res.status(400).json({ error: rangeMsg });
+  let selectedPorts: number[] = [];
+
+  if (presetName && PRESETS[presetName]) {
+    selectedPorts = PRESETS[presetName];
+  } else if (customPortsRaw) {
+    selectedPorts = parsePorts(customPortsRaw);
+    if (selectedPorts.length === 0) {
+      return res.status(400).json({ error: "No valid port numbers provided (1-65535)." });
+    }
+  } else if (startPortRaw !== undefined && endPortRaw !== undefined) {
+    const [rangeOk, rangeMsg] = validatePortRange(startPortRaw, endPortRaw);
+    if (!rangeOk) {
+      return res.status(400).json({ error: rangeMsg });
+    }
+    const s = Number(startPortRaw);
+    const e = Number(endPortRaw);
+    for (let p = s; p <= e; p++) {
+      selectedPorts.push(p);
+    }
+  } else {
+    // Default standard 1-1024
+    for (let p = 1; p <= 1024; p++) {
+      selectedPorts.push(p);
+    }
   }
 
   const [timeoutOk, timeoutMsg] = validateTimeout(timeoutRaw);
@@ -157,14 +179,12 @@ app.post("/api/scan", async (req: Request, res: Response) => {
     return res.status(400).json({ error: threadsMsg });
   }
 
-  const startPort = Number(startPortRaw);
-  const endPort = Number(endPortRaw);
   const timeout = Number(timeoutRaw);
   const threads = Math.min(Number(threadsRaw), MAX_THREADS);
 
-  if (endPort - startPort + 1 > MAX_PORTS_PER_SCAN) {
+  if (selectedPorts.length > MAX_PORTS_PER_SCAN) {
     return res.status(400).json({
-      error: `This hosted instance limits scans to ${MAX_PORTS_PER_SCAN} ports at a time. Narrow your range or run locally for larger scans.`,
+      error: `This instance limits scans to ${MAX_PORTS_PER_SCAN} ports at a time. Selected ${selectedPorts.length} ports. Narrow your selection for faster results.`,
     });
   }
 
@@ -176,8 +196,7 @@ app.post("/api/scan", async (req: Request, res: Response) => {
     status: "running",
     target: targetRaw,
     resolved_ip: resolvedIp,
-    start_port: startPort,
-    end_port: endPort,
+    ports: selectedPorts,
     results: [],
     duration: 0.0,
     finished_at: 0,
@@ -191,18 +210,17 @@ app.post("/api/scan", async (req: Request, res: Response) => {
     for (const listener of [...state.listeners]) {
       try {
         listener(event);
-      } catch (err) {
+      } catch {
         // listener error ignored
       }
     }
   };
 
-  logScanStart(targetRaw, startPort, endPort);
+  logScanStart(targetRaw, selectedPorts[0] || 1, selectedPorts[selectedPorts.length - 1] || 1);
 
   const scanner = new PortScanner({
     targetIp: resolvedIp,
-    startPort,
-    endPort,
+    ports: selectedPorts,
     timeout,
     maxThreads: threads,
     grabBanner: true,
@@ -228,7 +246,7 @@ app.post("/api/scan", async (req: Request, res: Response) => {
       const openPorts = results.filter((r) => r.status === "open").map((r) => r.port);
 
       if (stopped) {
-        logScanStopped(targetRaw, results.length, endPort - startPort + 1);
+        logScanStopped(targetRaw, results.length, selectedPorts.length);
       } else {
         logScanComplete(targetRaw, duration, openPorts, results.length);
       }
@@ -254,7 +272,7 @@ app.post("/api/scan", async (req: Request, res: Response) => {
     return res.status(500).json({ error: `Could not start scan: ${String(exc)}` });
   }
 
-  return res.json({ scan_id: scanId, resolved_ip: resolvedIp });
+  return res.json({ scan_id: scanId, resolved_ip: resolvedIp, total_ports: selectedPorts.length });
 });
 
 app.get("/api/scan/:scan_id/stream", (req: Request, res: Response) => {
@@ -347,7 +365,7 @@ app.get("/api/scan/:scan_id/export", (req: Request, res: Response) => {
   }
 });
 
-// Global Error Handler to catch any unhandled request errors gracefully
+// Global Error Handler
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   console.error("Unhandled server error:", err);
   res.status(500).json({ error: "Internal server error", details: err?.message || String(err) });

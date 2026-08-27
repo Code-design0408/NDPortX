@@ -17,8 +17,7 @@ export type DoneCallback = (results: ScanResult[], duration: number, stopped: bo
 
 export class PortScanner {
   public targetIp: string;
-  public startPort: number;
-  public endPort: number;
+  public ports: number[];
   public timeout: number;
   public maxThreads: number;
   public grabBanner: boolean;
@@ -34,8 +33,9 @@ export class PortScanner {
 
   constructor(options: {
     targetIp: string;
-    startPort: number;
-    endPort: number;
+    ports?: number[];
+    startPort?: number;
+    endPort?: number;
     timeout?: number;
     maxThreads?: number;
     grabBanner?: boolean;
@@ -44,8 +44,19 @@ export class PortScanner {
     onDone?: DoneCallback;
   }) {
     this.targetIp = options.targetIp;
-    this.startPort = options.startPort;
-    this.endPort = options.endPort;
+
+    if (options.ports && options.ports.length > 0) {
+      this.ports = Array.from(new Set(options.ports)).sort((a, b) => a - b);
+    } else {
+      const s = options.startPort ?? 1;
+      const e = options.endPort ?? 1024;
+      const list: number[] = [];
+      for (let p = s; p <= e; p++) {
+        list.push(p);
+      }
+      this.ports = list;
+    }
+
     this.timeout = options.timeout ?? 0.5;
     this.maxThreads = options.maxThreads ?? 100;
     this.grabBanner = options.grabBanner ?? true;
@@ -56,7 +67,7 @@ export class PortScanner {
   }
 
   get totalPorts(): number {
-    return this.endPort - this.startPort + 1;
+    return this.ports.length;
   }
 
   public start(): void {
@@ -86,12 +97,17 @@ export class PortScanner {
       let isSettled = false;
       const socket = new net.Socket();
       let timer: NodeJS.Timeout | null = null;
+      let bannerTimer: NodeJS.Timeout | null = null;
       let banner: string | null = null;
 
       const cleanup = () => {
         if (timer) {
           clearTimeout(timer);
           timer = null;
+        }
+        if (bannerTimer) {
+          clearTimeout(bannerTimer);
+          bannerTimer = null;
         }
         socket.removeAllListeners();
         socket.destroy();
@@ -107,55 +123,100 @@ export class PortScanner {
           status,
           service,
           banner,
-          response_ms: Math.round(elapsedMs * 100) / 100,
+          response_ms: Math.round(elapsedMs * 10) / 10,
           scanned_at: nowStr(),
         });
       };
 
+      // Connect timeout timer
       timer = setTimeout(() => {
         finish("filtered");
       }, timeoutMs);
 
       socket.setTimeout(timeoutMs);
 
-      socket.connect(port, this.targetIp, () => {
-        if (!this.grabBanner) {
-          finish("open");
-          return;
+      // Attempt TCP 3-way handshake
+      socket.connect(
+        {
+          port,
+          host: this.targetIp,
+        },
+        () => {
+          // Connected successfully => Port is definitely OPEN!
+          // Crucial: Clear the connect timeout immediately so it never falsely marks as filtered
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+
+          if (!this.grabBanner) {
+            finish("open");
+            return;
+          }
+
+          // Banner grab window
+          bannerTimer = setTimeout(() => {
+            finish("open");
+          }, 150);
+
+          socket.on("data", (chunk: Buffer) => {
+            const raw = chunk
+              .toString("utf-8")
+              .replace(/[\r\n\x00-\x1F\x7F]+/g, " ")
+              .trim();
+            if (raw) {
+              banner = raw.slice(0, 100);
+            }
+            finish("open");
+          });
+
+          socket.on("error", () => {
+            finish("open");
+          });
+
+          socket.on("close", () => {
+            finish("open");
+          });
+
+          // Send lightweight probe based on common services
+          try {
+            if (port === 80 || port === 8080 || port === 3000 || port === 5000 || port === 8000) {
+              socket.write(`HEAD / HTTP/1.0\r\nHost: ${this.targetIp}\r\n\r\n`);
+            } else if (port === 443 || port === 8443) {
+              // SSL/TLS will respond or disconnect; already open
+            } else {
+              socket.write("\r\n");
+            }
+          } catch {
+            // ignore probe write errors
+          }
         }
-
-        // Set quick banner grab timeout
-        socket.setTimeout(400);
-
-        socket.on("data", (chunk: Buffer) => {
-          banner = chunk
-            .toString("utf-8")
-            .replace(/[\r\n\x00-\x1F\x7F]+/g, " ")
-            .trim()
-            .slice(0, 120);
-          finish("open");
-        });
-
-        socket.on("timeout", () => {
-          finish("open");
-        });
-      });
+      );
 
       socket.on("timeout", () => {
         finish("filtered");
       });
 
       socket.on("error", (err: any) => {
-        if (err.code === "ECONNREFUSED") {
+        const code = err?.code || "";
+        if (code === "ECONNREFUSED") {
+          // RST received => Host is alive, port is closed
           finish("closed");
+        } else if (code === "ECONNRESET" || code === "EPIPE") {
+          // Connection accepted then reset => open
+          finish("open");
         } else if (
-          err.code === "ETIMEDOUT" ||
-          err.code === "EHOSTUNREACH" ||
-          err.code === "ENETUNREACH" ||
-          err.code === "ENOTFOUND"
+          code === "ETIMEDOUT" ||
+          code === "EHOSTUNREACH" ||
+          code === "ENETUNREACH" ||
+          code === "EHOSTDOWN" ||
+          code === "ENETDOWN" ||
+          code === "ENOTFOUND"
         ) {
+          // Firewall dropped packets or network unreachable
           finish("filtered");
         } else {
+          // General socket failure
           finish("closed");
         }
       });
@@ -163,11 +224,7 @@ export class PortScanner {
   }
 
   private async runPool(): Promise<void> {
-    const ports: number[] = [];
-    for (let p = this.startPort; p <= this.endPort; p++) {
-      ports.push(p);
-    }
-
+    const ports = this.ports;
     let currentIndex = 0;
     const workerCount = Math.min(this.maxThreads, ports.length);
 
@@ -199,7 +256,7 @@ export class PortScanner {
     const elapsed = this._stopwatch.elapsed() || 0.0;
     this._stopwatch.stop();
 
-    // Sort by port for stable order
+    // Stable sort by port
     this._results.sort((a, b) => a.port - b.port);
 
     if (this.onDone) {
